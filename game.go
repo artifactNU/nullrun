@@ -1,28 +1,46 @@
 package main
 
-import "codeberg.org/anaseto/gruid"
+import (
+	"math/rand"
+	"time"
+
+	"codeberg.org/anaseto/gruid"
+	"codeberg.org/anaseto/gruid/rl"
+)
+
+const fovRadius = 8
 
 // game is the application's Model. It implements gruid.Model.
 type game struct {
-	walls  [][]bool // [y][x]; true means blocked
+	net    *network
 	player gruid.Point
-	grid   gruid.Grid
+
+	fov        *rl.FOV
+	discovered map[gruid.Point]bool // ever been in view; fog hides the rest
+
+	grid gruid.Grid
 }
 
 func newGame() *game {
-	return &game{
-		walls:  buildMap(),
-		player: gruid.Point{X: 5, Y: 5},
-		grid:   gruid.NewGrid(mapWidth, mapHeight),
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	net := generateNetwork(rng)
+	g := &game{
+		net:        net,
+		player:     net.nodes[0],
+		fov:        rl.NewFOV(gruid.NewRange(0, 0, netWidth, netHeight)),
+		discovered: map[gruid.Point]bool{},
+		grid:       gruid.NewGrid(netWidth, netHeight),
 	}
+	g.scan()
+	return g
 }
 
-// blocked reports whether p is outside the map or a wall.
-func (g *game) blocked(p gruid.Point) bool {
-	if p.X < 0 || p.X >= mapWidth || p.Y < 0 || p.Y >= mapHeight {
-		return true
+// scan recomputes what's visible from the player's position and adds it to
+// the discovered set, which is permanent for the rest of the run.
+func (g *game) scan() {
+	for _, p := range g.fov.SSCVisionMap(g.player, fovRadius, g.net.walkable, true) {
+		g.discovered[p] = true
 	}
-	return g.walls[p.Y][p.X]
 }
 
 // Update implements gruid.Model.Update.
@@ -55,8 +73,9 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 		return nil
 	}
 	next := g.player.Shift(dx, dy)
-	if !g.blocked(next) {
+	if g.net.walkable(next) {
 		g.player = next
+		g.scan()
 	}
 	return nil
 }
@@ -67,10 +86,14 @@ func (g *game) Draw() gruid.Grid {
 		switch {
 		case p == g.player:
 			return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
-		case g.walls[p.Y][p.X]:
-			return gruid.Cell{Rune: '#', Style: gruid.Style{Fg: ColorWall}}
+		case !g.discovered[p]:
+			return gruid.Cell{Rune: ' '}
+		case g.net.tiles[p.Y][p.X] == tileNode:
+			return gruid.Cell{Rune: '◊', Style: gruid.Style{Fg: ColorNode}}
+		case g.net.tiles[p.Y][p.X] == tileEdge:
+			return gruid.Cell{Rune: '·', Style: gruid.Style{Fg: ColorEdge}}
 		default:
-			return gruid.Cell{Rune: '.', Style: gruid.Style{Fg: ColorFloor}}
+			return gruid.Cell{Rune: ' '}
 		}
 	})
 	return g.grid

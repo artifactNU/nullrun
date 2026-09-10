@@ -9,8 +9,8 @@ import (
 // reserved to mean "terminal default", so ours start at 1.
 const (
 	ColorPlayer gruid.Color = iota + 1
-	ColorWall
-	ColorFloor
+	ColorNode
+	ColorEdge
 )
 
 // styleManager implements gtcell.StyleManager, mapping gruid's abstract
@@ -22,9 +22,9 @@ func (styleManager) GetStyle(st gruid.Style) tcell.Style {
 	switch st.Fg {
 	case ColorPlayer:
 		ts = ts.Foreground(tcell.ColorGreen)
-	case ColorWall:
-		ts = ts.Foreground(tcell.ColorTeal)
-	case ColorFloor:
+	case ColorNode:
+		ts = ts.Foreground(tcell.ColorAqua)
+	case ColorEdge:
 		ts = ts.Foreground(tcell.ColorGray)
 	default:
 		ts = ts.Foreground(tcell.ColorReset)
