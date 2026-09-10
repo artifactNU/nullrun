@@ -1,0 +1,37 @@
+package main
+
+import (
+	"codeberg.org/anaseto/gruid"
+	"github.com/gdamore/tcell/v2"
+)
+
+// Foreground colors used by the game. ColorDefault (the gruid zero value) is
+// reserved to mean "terminal default", so ours start at 1.
+const (
+	ColorPlayer gruid.Color = iota + 1
+	ColorWall
+	ColorFloor
+)
+
+// styleManager implements gtcell.StyleManager, mapping gruid's abstract
+// colors to concrete tcell ones.
+type styleManager struct{}
+
+func (styleManager) GetStyle(st gruid.Style) tcell.Style {
+	ts := tcell.StyleDefault
+	switch st.Fg {
+	case ColorPlayer:
+		ts = ts.Foreground(tcell.ColorGreen)
+	case ColorWall:
+		ts = ts.Foreground(tcell.ColorTeal)
+	case ColorFloor:
+		ts = ts.Foreground(tcell.ColorGray)
+	default:
+		ts = ts.Foreground(tcell.ColorReset)
+	}
+	switch st.Bg {
+	default:
+		ts = ts.Background(tcell.ColorReset)
+	}
+	return ts
+}
