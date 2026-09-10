@@ -41,12 +41,12 @@ most important thing to get right.
 
 One network you can win or lose. Build in order, play after each step.
 
-- **M0.** gruid + tcell running, a map, `@` moving with hjkl/arrows, walls.
-- **M1.** Generate the node graph, draw it, fog so you only see what you scanned.
-- **M2.** Datastore node + exit at the entry. Grab data, get back out. Win condition.
-- **M3.** Trace fills as you act, maxing it ends the run. Now it's actually a game.
-- **M4.** One enemy: a sentry that damages integrity, and one program to break it.
-- **M5.** A small program kit (icebreaker, scanner, cloak) gated by RAM.
+- [x] **M0.** gruid + tcell running, a map, `@` moving with hjkl/arrows, walls.
+- [x] **M1.** Generate the node graph, draw it, fog so you only see what you scanned.
+- [x] **M2.** Datastore node + exit at the entry. Grab data, get back out. Win condition.
+- [ ] **M3.** Trace fills as you act, maxing it ends the run. Now it's actually a game.
+- [ ] **M4.** One enemy: a sentry that damages integrity, and one program to break it.
+- [ ] **M5.** A small program kit (icebreaker, scanner, cloak) gated by RAM.
 
 M5 done = a real, self-contained game worth shipping.
 
