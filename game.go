@@ -18,6 +18,10 @@ type game struct {
 	fov        *rl.FOV
 	discovered map[gruid.Point]bool // ever been in view; fog hides the rest
 
+	hasData bool
+	won     bool
+	message string
+
 	grid gruid.Grid
 }
 
@@ -26,10 +30,10 @@ func newGame() *game {
 	net := generateNetwork(rng)
 	g := &game{
 		net:        net,
-		player:     net.nodes[0],
+		player:     net.entry,
 		fov:        rl.NewFOV(gruid.NewRange(0, 0, netWidth, netHeight)),
 		discovered: map[gruid.Point]bool{},
-		grid:       gruid.NewGrid(netWidth, netHeight),
+		grid:       gruid.NewGrid(netWidth, netHeight+1), // +1 for the message line
 	}
 	g.scan()
 	return g
@@ -57,6 +61,13 @@ func (g *game) Update(msg gruid.Msg) gruid.Effect {
 }
 
 func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
+	if msg.Key == gruid.KeyEscape || msg.Key == "q" {
+		return gruid.End()
+	}
+	if g.won {
+		return nil
+	}
+
 	var dx, dy int
 	switch msg.Key {
 	case gruid.KeyArrowLeft, "h":
@@ -67,27 +78,49 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 		dy = -1
 	case gruid.KeyArrowDown, "j":
 		dy = 1
-	case gruid.KeyEscape, "q":
-		return gruid.End()
 	default:
 		return nil
 	}
 	next := g.player.Shift(dx, dy)
-	if g.net.walkable(next) {
-		g.player = next
-		g.scan()
+	if !g.net.walkable(next) {
+		return nil
 	}
+	g.player = next
+	g.scan()
+	g.checkObjective()
 	return nil
+}
+
+// checkObjective handles reaching the datastore and getting back to the
+// entry point with the data, which is the run's win condition.
+func (g *game) checkObjective() {
+	switch {
+	case !g.hasData && g.player == g.net.datastore:
+		g.hasData = true
+		g.message = "Data acquired. Get back to the entry to jack out."
+	case g.hasData && g.player == g.net.entry:
+		g.won = true
+		g.message = "Data extracted — run complete. Press q to quit."
+	}
 }
 
 // Draw implements gruid.Model.Draw.
 func (g *game) Draw() gruid.Grid {
+	msg := []rune(g.message)
 	g.grid.Map(func(p gruid.Point, _ gruid.Cell) gruid.Cell {
+		if p.Y == netHeight {
+			if p.X < len(msg) {
+				return gruid.Cell{Rune: msg[p.X]}
+			}
+			return gruid.Cell{Rune: ' '}
+		}
 		switch {
 		case p == g.player:
 			return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
 		case !g.discovered[p]:
 			return gruid.Cell{Rune: ' '}
+		case p == g.net.datastore && !g.hasData:
+			return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
 		case g.net.tiles[p.Y][p.X] == tileNode:
 			return gruid.Cell{Rune: '◊', Style: gruid.Style{Fg: ColorNode}}
 		case g.net.tiles[p.Y][p.X] == tileEdge:

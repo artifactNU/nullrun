@@ -31,10 +31,13 @@ const (
 )
 
 // network holds the generated map: which tiles are walkable (node or edge)
-// and where the nodes are.
+// and where the nodes are. entry is where the player jacks in and must
+// return to; datastore is the objective node.
 type network struct {
-	tiles [][]tileKind // [y][x]
-	nodes []gruid.Point
+	tiles     [][]tileKind // [y][x]
+	nodes     []gruid.Point
+	entry     gruid.Point
+	datastore gruid.Point
 }
 
 func (nw *network) walkable(p gruid.Point) bool {
@@ -58,7 +61,26 @@ func generateNetwork(rng *rand.Rand) *network {
 		nw.tiles[p.Y][p.X] = tileNode
 	}
 
+	nw.entry = nw.nodes[0]
+	nw.datastore = farthestNode(nw.nodes, nw.entry)
+
 	return nw
+}
+
+// farthestNode returns the node farthest (by straight-line distance) from a
+// given point, used to place the datastore away from the entry.
+func farthestNode(nodes []gruid.Point, from gruid.Point) gruid.Point {
+	best := nodes[0]
+	bestDist := -1
+	for _, p := range nodes {
+		if p == from {
+			continue
+		}
+		if d := sqDist(p, from); d > bestDist {
+			best, bestDist = p, d
+		}
+	}
+	return best
 }
 
 // placeNodes scatters one node per cell of a netCols x netRows grid, with a

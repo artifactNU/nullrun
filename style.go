@@ -11,6 +11,7 @@ const (
 	ColorPlayer gruid.Color = iota + 1
 	ColorNode
 	ColorEdge
+	ColorData
 )
 
 // styleManager implements gtcell.StyleManager, mapping gruid's abstract
@@ -26,6 +27,8 @@ func (styleManager) GetStyle(st gruid.Style) tcell.Style {
 		ts = ts.Foreground(tcell.ColorAqua)
 	case ColorEdge:
 		ts = ts.Foreground(tcell.ColorGray)
+	case ColorData:
+		ts = ts.Foreground(tcell.ColorYellow)
 	default:
 		ts = ts.Foreground(tcell.ColorReset)
 	}
