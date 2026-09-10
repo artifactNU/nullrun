@@ -28,13 +28,13 @@ for the plan.
 Needs [Go](https://go.dev/dl/) 1.21+.
 
 ```sh
-go install github.com/yourname/nullrun@latest
+go install github.com/artifactNU/nullrun@latest
 ```
 
 Or from source:
 
 ```sh
-git clone https://github.com/yourname/nullrun.git
+git clone https://github.com/artifactNU/nullrun.git
 cd nullrun && go build -o nullrun . && ./nullrun
 ```
 
