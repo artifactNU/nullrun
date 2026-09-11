@@ -20,18 +20,37 @@ const fovRadius = 8
 const (
 	traceMax      = 185
 	traceStep     = 1
-	traceBarWidth = 20
+	traceBarWidth = 12
 )
 
 // integrityMax is starting health; zero means you flatline. The sentry ICE
 // deals sentryDamage per hit — enough that one contact is a real cost but
-// not an instant kill, and breaking it (traceStep*breakCost trace) is
-// pricier than a move since it's a bigger action against the system.
+// not an instant kill.
 const (
 	integrityMax      = 100
-	integrityBarWidth = 20
+	integrityBarWidth = 12
 	sentryDamage      = 25
-	breakCost         = 3
+)
+
+// RAM is a fixed budget for the whole run — it does not recharge, so
+// running a program is spending down a resource you can't get back, not
+// topping off a meter. Costs are sized so you can afford one coherent plan
+// (say, scan then break) but not everything: break+cloak alone already
+// blows the budget, since a run only ever has the one sentry to deal with.
+// Each program also taxes the trace meter via its own traceStep multiplier.
+const (
+	ramMax      = 8
+	ramBarWidth = 10
+
+	breakRAMCost   = 4
+	breakTraceCost = 3
+
+	scanRAMCost   = 3
+	scanTraceCost = 2
+
+	cloakRAMCost   = 5
+	cloakTraceCost = 2
+	cloakDuration  = 6 // turns of sentry immunity after casting
 )
 
 // game is the application's Model. It implements gruid.Model.
@@ -44,6 +63,9 @@ type game struct {
 
 	trace      int
 	integrity  int
+	ram        int
+	cloakTurns int // remaining turns the sentry can't see or block you
+
 	iceAlive   bool
 	iceSpotted bool // for the one-time "hasn't seen you yet" flavor message
 
@@ -65,6 +87,7 @@ func newGame() *game {
 		fov:        rl.NewFOV(gruid.NewRange(0, 0, netWidth, netHeight)),
 		discovered: map[gruid.Point]bool{},
 		integrity:  integrityMax,
+		ram:        ramMax,
 		iceAlive:   true,
 		grid:       gruid.NewGrid(netWidth, netHeight+2), // +1 stats bar, +1 message line
 	}
@@ -116,8 +139,14 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if g.won || g.traced || g.flatlined {
 		return nil
 	}
-	if msg.Key == "b" {
+
+	switch msg.Key {
+	case "b":
 		return g.updateBreak()
+	case "s":
+		return g.updateScan()
+	case "c":
+		return g.updateCloak()
 	}
 
 	var dx, dy int
@@ -137,8 +166,8 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if !g.net.walkable(next) {
 		return nil
 	}
-	if next == g.net.sentry && g.iceAlive {
-		g.message = "The sentry ICE blocks the way. Break it (b) or find another route."
+	if next == g.net.sentry && g.iceAlive && g.cloakTurns == 0 {
+		g.message = "The sentry ICE blocks the way. Break it (b), cloak past it (c), or find another route."
 		return nil
 	}
 	g.player = next
@@ -147,7 +176,7 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if g.traced {
 		return nil
 	}
-	g.resolveSentry()
+	g.afterAction()
 	if g.flatlined {
 		return nil
 	}
@@ -162,16 +191,86 @@ func (g *game) updateBreak() gruid.Effect {
 		g.message = "Nothing to break here."
 		return nil
 	}
+	if !g.spendRAM(breakRAMCost) {
+		return nil
+	}
 	g.iceAlive = false
 	g.message = "Sentry ICE broken. The way is clear."
-	g.addTrace(traceStep * breakCost)
+	g.addTrace(traceStep * breakTraceCost)
+	if g.traced {
+		return nil
+	}
+	g.afterAction()
 	return nil
 }
 
-// resolveSentry deals damage if the player is next to a still-alive sentry
-// ICE, ending the run if it drops integrity to zero.
+// updateScan handles the "s" command: a full network ping that reveals
+// every corridor and node on the map, ignoring fog and line of sight.
+func (g *game) updateScan() gruid.Effect {
+	if !g.spendRAM(scanRAMCost) {
+		return nil
+	}
+	for y := range g.net.tiles {
+		for x := range g.net.tiles[y] {
+			if g.net.tiles[y][x] != tileVoid {
+				g.discovered[gruid.Point{X: x, Y: y}] = true
+			}
+		}
+	}
+	g.message = "Scanner ping complete. Network topology revealed."
+	g.addTrace(traceStep * scanTraceCost)
+	if g.traced {
+		return nil
+	}
+	g.afterAction()
+	return nil
+}
+
+// updateCloak handles the "c" command: go dark for cloakDuration turns,
+// during which the sentry ICE neither blocks you nor hits you.
+func (g *game) updateCloak() gruid.Effect {
+	if !g.spendRAM(cloakRAMCost) {
+		return nil
+	}
+	g.cloakTurns = cloakDuration
+	g.message = "Cloak engaged. ICE won't see you for a while."
+	g.addTrace(traceStep * cloakTraceCost)
+	if g.traced {
+		return nil
+	}
+	g.afterAction()
+	return nil
+}
+
+// spendRAM attempts to deduct cost from the RAM pool, returning false (and
+// setting a message) if there isn't enough to cover it.
+func (g *game) spendRAM(cost int) bool {
+	if g.ram < cost {
+		g.message = "Not enough RAM."
+		return false
+	}
+	g.ram -= cost
+	return true
+}
+
+// afterAction runs the bookkeeping shared by every turn-consuming action:
+// an active cloak counts down, and the sentry ICE (if still alive,
+// adjacent, and not cloaked against) gets its counter-attack in. RAM does
+// not recharge — what you spend is gone for the run.
+func (g *game) afterAction() {
+	if g.cloakTurns > 0 {
+		g.cloakTurns--
+		if g.cloakTurns == 0 {
+			g.message = "Your cloak fades."
+		}
+	}
+	g.resolveSentry()
+}
+
+// resolveSentry deals damage if the player is next to a still-alive,
+// uncloaked sentry ICE, ending the run if it drops integrity to zero.
 func (g *game) resolveSentry() {
-	if !g.iceAlive || !adjacent(g.player, g.net.sentry) {
+	if !g.iceAlive || g.cloakTurns > 0 || !adjacent(g.player, g.net.sentry) {
 		return
 	}
 	g.integrity -= sentryDamage
@@ -197,20 +296,26 @@ func (g *game) addTrace(amount int) {
 // traceBar renders the TRACE meter as a label plus a block of filled and
 // empty cells, e.g. "TRACE ███░░░░░░░".
 func (g *game) traceBar() string {
-	return "TRACE " + meterBar(g.trace, traceMax, traceBarWidth)
+	return "TRACE " + meterBar(g.trace, traceMax, traceBarWidth, '█')
 }
 
 // integrityBar renders the INTEGRITY meter the same way.
 func (g *game) integrityBar() string {
-	return "INTEGRITY " + meterBar(g.integrity, integrityMax, integrityBarWidth)
+	return "INTEGRITY " + meterBar(g.integrity, integrityMax, integrityBarWidth, '█')
 }
 
-func meterBar(value, max, width int) string {
+// ramBar renders the RAM meter with its own fill glyph to set it apart from
+// the other two meters at a glance.
+func (g *game) ramBar() string {
+	return "RAM " + meterBar(g.ram, ramMax, ramBarWidth, '▓')
+}
+
+func meterBar(value, max, width int, fill rune) string {
 	filled := value * width / max
 	bar := make([]rune, width)
 	for i := range bar {
 		if i < filled {
-			bar[i] = '█'
+			bar[i] = fill
 		} else {
 			bar[i] = '░'
 		}
@@ -234,9 +339,15 @@ func (g *game) checkObjective() {
 // Draw implements gruid.Model.Draw.
 func (g *game) Draw() gruid.Grid {
 	msg := []rune(g.message)
+
 	integrityStr := g.integrityBar()
-	traceStart := len([]rune(integrityStr)) + 2 // "  " separator
-	stats := []rune(integrityStr + "  " + g.traceBar())
+	traceStr := g.traceBar()
+	ramStr := g.ramBar()
+	const sep = "  "
+	stats := []rune(integrityStr + sep + traceStr + sep + ramStr)
+	integrityEnd := len([]rune(integrityStr))
+	traceEnd := integrityEnd + len(sep) + len([]rune(traceStr))
+
 	g.grid.Map(func(p gruid.Point, _ gruid.Cell) gruid.Cell {
 		if p.Y == netHeight+1 {
 			if p.X < len(msg) {
@@ -246,9 +357,12 @@ func (g *game) Draw() gruid.Grid {
 		}
 		if p.Y == netHeight {
 			if p.X < len(stats) {
-				col := ColorTrace
-				if p.X < traceStart {
+				col := ColorRAM
+				switch {
+				case p.X < integrityEnd:
 					col = ColorIntegrity
+				case p.X < traceEnd:
+					col = ColorTrace
 				}
 				return gruid.Cell{Rune: stats[p.X], Style: gruid.Style{Fg: col}}
 			}

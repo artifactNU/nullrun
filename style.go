@@ -15,6 +15,7 @@ const (
 	ColorTrace
 	ColorIntegrity
 	ColorIce
+	ColorRAM
 )
 
 // styleManager implements gtcell.StyleManager, mapping gruid's abstract
@@ -38,6 +39,8 @@ func (styleManager) GetStyle(st gruid.Style) tcell.Style {
 		ts = ts.Foreground(tcell.ColorGreen)
 	case ColorIce:
 		ts = ts.Foreground(tcell.ColorFuchsia)
+	case ColorRAM:
+		ts = ts.Foreground(tcell.ColorBlue)
 	default:
 		ts = ts.Foreground(tcell.ColorReset)
 	}
