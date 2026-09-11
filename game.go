@@ -377,6 +377,8 @@ func (g *game) Draw() gruid.Grid {
 			return gruid.Cell{Rune: '▲', Style: gruid.Style{Fg: ColorIce}}
 		case p == g.net.datastore && !g.hasData:
 			return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
+		case p == g.net.entry:
+			return gruid.Cell{Rune: '⌂', Style: gruid.Style{Fg: ColorEntry}}
 		case g.net.tiles[p.Y][p.X] == tileNode:
 			return gruid.Cell{Rune: '◊', Style: gruid.Style{Fg: ColorNode}}
 		case g.net.tiles[p.Y][p.X] == tileEdge:
