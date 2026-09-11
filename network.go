@@ -32,12 +32,14 @@ const (
 
 // network holds the generated map: which tiles are walkable (node or edge)
 // and where the nodes are. entry is where the player jacks in and must
-// return to; datastore is the objective node.
+// return to; datastore is the objective node; sentry is a node held by a
+// sentry ICE that blocks passage until broken.
 type network struct {
 	tiles     [][]tileKind // [y][x]
 	nodes     []gruid.Point
 	entry     gruid.Point
 	datastore gruid.Point
+	sentry    gruid.Point
 }
 
 func (nw *network) walkable(p gruid.Point) bool {
@@ -63,8 +65,27 @@ func generateNetwork(rng *rand.Rand) *network {
 
 	nw.entry = nw.nodes[0]
 	nw.datastore = farthestNode(nw.nodes, nw.entry)
+	nw.sentry = otherNode(nw.nodes, rng, nw.entry, nw.datastore)
 
 	return nw
+}
+
+// otherNode picks a random node that isn't any of the excluded points.
+func otherNode(nodes []gruid.Point, rng *rand.Rand, exclude ...gruid.Point) gruid.Point {
+	excluded := func(p gruid.Point) bool {
+		for _, e := range exclude {
+			if p == e {
+				return true
+			}
+		}
+		return false
+	}
+	for {
+		p := nodes[rng.Intn(len(nodes))]
+		if !excluded(p) {
+			return p
+		}
+	}
 }
 
 // farthestNode returns the node farthest (by straight-line distance) from a

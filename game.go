@@ -23,6 +23,17 @@ const (
 	traceBarWidth = 20
 )
 
+// integrityMax is starting health; zero means you flatline. The sentry ICE
+// deals sentryDamage per hit — enough that one contact is a real cost but
+// not an instant kill, and breaking it (traceStep*breakCost trace) is
+// pricier than a move since it's a bigger action against the system.
+const (
+	integrityMax      = 100
+	integrityBarWidth = 20
+	sentryDamage      = 25
+	breakCost         = 3
+)
+
 // game is the application's Model. It implements gruid.Model.
 type game struct {
 	net    *network
@@ -31,12 +42,16 @@ type game struct {
 	fov        *rl.FOV
 	discovered map[gruid.Point]bool // ever been in view; fog hides the rest
 
-	trace int
+	trace      int
+	integrity  int
+	iceAlive   bool
+	iceSpotted bool // for the one-time "hasn't seen you yet" flavor message
 
-	hasData bool
-	won     bool
-	traced  bool
-	message string
+	hasData   bool
+	won       bool
+	traced    bool
+	flatlined bool
+	message   string
 
 	grid gruid.Grid
 }
@@ -49,6 +64,8 @@ func newGame() *game {
 		player:     net.entry,
 		fov:        rl.NewFOV(gruid.NewRange(0, 0, netWidth, netHeight)),
 		discovered: map[gruid.Point]bool{},
+		integrity:  integrityMax,
+		iceAlive:   true,
 		grid:       gruid.NewGrid(netWidth, netHeight+2), // +1 stats bar, +1 message line
 	}
 	g.scan()
@@ -59,8 +76,24 @@ func newGame() *game {
 // the discovered set, which is permanent for the rest of the run.
 func (g *game) scan() {
 	for _, p := range g.fov.SSCVisionMap(g.player, fovRadius, g.net.walkable, true) {
+		if !g.discovered[p] && p == g.net.sentry && g.iceAlive && !g.iceSpotted {
+			g.iceSpotted = true
+			g.message = "A sentry ICE blocks the way ahead. It hasn't noticed you yet."
+		}
 		g.discovered[p] = true
 	}
+}
+
+// adjacent reports whether a and b are one orthogonal step apart.
+func adjacent(a, b gruid.Point) bool {
+	dx, dy := a.X-b.X, a.Y-b.Y
+	if dx < 0 {
+		dx = -dx
+	}
+	if dy < 0 {
+		dy = -dy
+	}
+	return dx+dy == 1
 }
 
 // Update implements gruid.Model.Update.
@@ -80,8 +113,11 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if msg.Key == gruid.KeyEscape || msg.Key == "q" {
 		return gruid.End()
 	}
-	if g.won || g.traced {
+	if g.won || g.traced || g.flatlined {
 		return nil
+	}
+	if msg.Key == "b" {
+		return g.updateBreak()
 	}
 
 	var dx, dy int
@@ -101,14 +137,51 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if !g.net.walkable(next) {
 		return nil
 	}
+	if next == g.net.sentry && g.iceAlive {
+		g.message = "The sentry ICE blocks the way. Break it (b) or find another route."
+		return nil
+	}
 	g.player = next
 	g.scan()
 	g.addTrace(traceStep)
 	if g.traced {
 		return nil
 	}
+	g.resolveSentry()
+	if g.flatlined {
+		return nil
+	}
 	g.checkObjective()
 	return nil
+}
+
+// updateBreak handles the "b" command: destroy the sentry ICE if the
+// player is standing next to it.
+func (g *game) updateBreak() gruid.Effect {
+	if !g.iceAlive || !adjacent(g.player, g.net.sentry) {
+		g.message = "Nothing to break here."
+		return nil
+	}
+	g.iceAlive = false
+	g.message = "Sentry ICE broken. The way is clear."
+	g.addTrace(traceStep * breakCost)
+	return nil
+}
+
+// resolveSentry deals damage if the player is next to a still-alive sentry
+// ICE, ending the run if it drops integrity to zero.
+func (g *game) resolveSentry() {
+	if !g.iceAlive || !adjacent(g.player, g.net.sentry) {
+		return
+	}
+	g.integrity -= sentryDamage
+	if g.integrity <= 0 {
+		g.integrity = 0
+		g.flatlined = true
+		g.message = "FLATLINED. The sentry ICE fries your brain. Press q to quit."
+		return
+	}
+	g.message = "The sentry ICE hits you. Integrity dropping."
 }
 
 // addTrace fills the trace meter, ending the run if it maxes out.
@@ -124,8 +197,17 @@ func (g *game) addTrace(amount int) {
 // traceBar renders the TRACE meter as a label plus a block of filled and
 // empty cells, e.g. "TRACE ███░░░░░░░".
 func (g *game) traceBar() string {
-	filled := g.trace * traceBarWidth / traceMax
-	bar := make([]rune, traceBarWidth)
+	return "TRACE " + meterBar(g.trace, traceMax, traceBarWidth)
+}
+
+// integrityBar renders the INTEGRITY meter the same way.
+func (g *game) integrityBar() string {
+	return "INTEGRITY " + meterBar(g.integrity, integrityMax, integrityBarWidth)
+}
+
+func meterBar(value, max, width int) string {
+	filled := value * width / max
+	bar := make([]rune, width)
 	for i := range bar {
 		if i < filled {
 			bar[i] = '█'
@@ -133,7 +215,7 @@ func (g *game) traceBar() string {
 			bar[i] = '░'
 		}
 	}
-	return "TRACE " + string(bar)
+	return string(bar)
 }
 
 // checkObjective handles reaching the datastore and getting back to the
@@ -152,7 +234,9 @@ func (g *game) checkObjective() {
 // Draw implements gruid.Model.Draw.
 func (g *game) Draw() gruid.Grid {
 	msg := []rune(g.message)
-	stats := []rune(g.traceBar())
+	integrityStr := g.integrityBar()
+	traceStart := len([]rune(integrityStr)) + 2 // "  " separator
+	stats := []rune(integrityStr + "  " + g.traceBar())
 	g.grid.Map(func(p gruid.Point, _ gruid.Cell) gruid.Cell {
 		if p.Y == netHeight+1 {
 			if p.X < len(msg) {
@@ -162,7 +246,11 @@ func (g *game) Draw() gruid.Grid {
 		}
 		if p.Y == netHeight {
 			if p.X < len(stats) {
-				return gruid.Cell{Rune: stats[p.X], Style: gruid.Style{Fg: ColorTrace}}
+				col := ColorTrace
+				if p.X < traceStart {
+					col = ColorIntegrity
+				}
+				return gruid.Cell{Rune: stats[p.X], Style: gruid.Style{Fg: col}}
 			}
 			return gruid.Cell{Rune: ' '}
 		}
@@ -171,6 +259,8 @@ func (g *game) Draw() gruid.Grid {
 			return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
 		case !g.discovered[p]:
 			return gruid.Cell{Rune: ' '}
+		case p == g.net.sentry && g.iceAlive:
+			return gruid.Cell{Rune: '▲', Style: gruid.Style{Fg: ColorIce}}
 		case p == g.net.datastore && !g.hasData:
 			return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
 		case g.net.tiles[p.Y][p.X] == tileNode:
