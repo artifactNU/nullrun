@@ -53,8 +53,30 @@ const (
 	cloakDuration  = 6 // turns of sentry immunity after casting
 )
 
+// The game view is framed in a box: a title bar naming the network, the
+// map, a separator, then the stats and message lines inside the border.
+const (
+	borderWidth  = netWidth + 2
+	borderHeight = netHeight + 5
+
+	rowSeparator = netHeight + 1
+	rowStats     = netHeight + 2
+	rowMessage   = netHeight + 3
+	rowBottom    = netHeight + 4
+)
+
+// screen selects which of the game's two views Update and Draw operate on.
+type screen int
+
+const (
+	screenSplash screen = iota
+	screenPlaying
+)
+
 // game is the application's Model. It implements gruid.Model.
 type game struct {
+	screen screen
+
 	net    *network
 	player gruid.Point
 
@@ -89,7 +111,7 @@ func newGame() *game {
 		integrity:  integrityMax,
 		ram:        ramMax,
 		iceAlive:   true,
-		grid:       gruid.NewGrid(netWidth, netHeight+2), // +1 stats bar, +1 message line
+		grid:       gruid.NewGrid(1, 1), // resized on first Draw to fit the current screen
 	}
 	g.scan()
 	return g
@@ -133,6 +155,10 @@ func (g *game) Update(msg gruid.Msg) gruid.Effect {
 }
 
 func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
+	if g.screen == screenSplash {
+		g.screen = screenPlaying
+		return nil
+	}
 	if msg.Key == gruid.KeyEscape || msg.Key == "q" {
 		return gruid.End()
 	}
@@ -167,7 +193,7 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 		return nil
 	}
 	if next == g.net.sentry && g.iceAlive && g.cloakTurns == 0 {
-		g.message = "The sentry ICE blocks the way. Break it (b), cloak past it (c), or find another route."
+		g.message = "Sentry ICE blocks the way. Break (b) or cloak past (c)."
 		return nil
 	}
 	g.player = next
@@ -338,54 +364,85 @@ func (g *game) checkObjective() {
 
 // Draw implements gruid.Model.Draw.
 func (g *game) Draw() gruid.Grid {
-	msg := []rune(g.message)
+	if g.screen == screenSplash {
+		return g.drawSplash()
+	}
+	return g.drawGame()
+}
+
+// drawGame renders the network view inside a box-drawn frame: a title bar
+// naming the network, the map, a separator, then stats and message lines.
+func (g *game) drawGame() gruid.Grid {
+	g.grid = g.grid.Resize(borderWidth, borderHeight)
 
 	integrityStr := g.integrityBar()
 	traceStr := g.traceBar()
 	ramStr := g.ramBar()
 	const sep = "  "
-	stats := []rune(integrityStr + sep + traceStr + sep + ramStr)
-	integrityEnd := len([]rune(integrityStr))
+	statsLine := " " + integrityStr + sep + traceStr + sep + ramStr
+	stats := []rune(padTrunc(statsLine, netWidth))
+	integrityEnd := 1 + len([]rune(integrityStr))
 	traceEnd := integrityEnd + len(sep) + len([]rune(traceStr))
 
+	msg := []rune(padTrunc(" > "+g.message, netWidth))
+
+	top := []rune(topBorder(g.net.name))
+	middle := []rune(separatorBorder())
+	bottom := []rune(bottomBorder())
+
 	g.grid.Map(func(p gruid.Point, _ gruid.Cell) gruid.Cell {
-		if p.Y == netHeight+1 {
-			if p.X < len(msg) {
-				return gruid.Cell{Rune: msg[p.X]}
+		switch p.Y {
+		case 0:
+			return frameCell(top, p.X)
+		case rowBottom:
+			return frameCell(bottom, p.X)
+		case rowSeparator:
+			return frameCell(middle, p.X)
+		case rowStats, rowMessage:
+			if p.X == 0 || p.X == borderWidth-1 {
+				return gruid.Cell{Rune: '│', Style: gruid.Style{Fg: ColorNode}}
 			}
-			return gruid.Cell{Rune: ' '}
-		}
-		if p.Y == netHeight {
-			if p.X < len(stats) {
+			ix := p.X - 1
+			if p.Y == rowStats {
 				col := ColorRAM
 				switch {
-				case p.X < integrityEnd:
+				case ix < integrityEnd:
 					col = ColorIntegrity
-				case p.X < traceEnd:
+				case ix < traceEnd:
 					col = ColorTrace
 				}
-				return gruid.Cell{Rune: stats[p.X], Style: gruid.Style{Fg: col}}
+				return gruid.Cell{Rune: stats[ix], Style: gruid.Style{Fg: col}}
 			}
-			return gruid.Cell{Rune: ' '}
-		}
-		switch {
-		case p == g.player:
-			return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
-		case !g.discovered[p]:
-			return gruid.Cell{Rune: ' '}
-		case p == g.net.sentry && g.iceAlive:
-			return gruid.Cell{Rune: '▲', Style: gruid.Style{Fg: ColorIce}}
-		case p == g.net.datastore && !g.hasData:
-			return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
-		case p == g.net.entry:
-			return gruid.Cell{Rune: '⌂', Style: gruid.Style{Fg: ColorEntry}}
-		case g.net.tiles[p.Y][p.X] == tileNode:
-			return gruid.Cell{Rune: '◊', Style: gruid.Style{Fg: ColorNode}}
-		case g.net.tiles[p.Y][p.X] == tileEdge:
-			return gruid.Cell{Rune: '·', Style: gruid.Style{Fg: ColorEdge}}
+			return gruid.Cell{Rune: msg[ix]}
 		default:
-			return gruid.Cell{Rune: ' '}
+			if p.X == 0 || p.X == borderWidth-1 {
+				return gruid.Cell{Rune: '│', Style: gruid.Style{Fg: ColorNode}}
+			}
+			return g.mapCell(gruid.Point{X: p.X - 1, Y: p.Y - 1})
 		}
 	})
 	return g.grid
+}
+
+// mapCell returns the cell to draw for a position on the network map
+// itself (not the border or stats/message lines).
+func (g *game) mapCell(p gruid.Point) gruid.Cell {
+	switch {
+	case p == g.player:
+		return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
+	case !g.discovered[p]:
+		return gruid.Cell{Rune: ' '}
+	case p == g.net.sentry && g.iceAlive:
+		return gruid.Cell{Rune: '▲', Style: gruid.Style{Fg: ColorIce}}
+	case p == g.net.datastore && !g.hasData:
+		return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
+	case p == g.net.entry:
+		return gruid.Cell{Rune: '⌂', Style: gruid.Style{Fg: ColorEntry}}
+	case g.net.tiles[p.Y][p.X] == tileNode:
+		return gruid.Cell{Rune: '◊', Style: gruid.Style{Fg: ColorNode}}
+	case g.net.tiles[p.Y][p.X] == tileEdge:
+		return gruid.Cell{Rune: '·', Style: gruid.Style{Fg: ColorEdge}}
+	default:
+		return gruid.Cell{Rune: ' '}
+	}
 }

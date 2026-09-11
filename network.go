@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
 
 	"codeberg.org/anaseto/gruid"
@@ -33,13 +34,36 @@ const (
 // network holds the generated map: which tiles are walkable (node or edge)
 // and where the nodes are. entry is where the player jacks in and must
 // return to; datastore is the objective node; sentry is a node held by a
-// sentry ICE that blocks passage until broken.
+// sentry ICE that blocks passage until broken. name is cosmetic flavor
+// shown in the UI border.
 type network struct {
+	name      string
 	tiles     [][]tileKind // [y][x]
 	nodes     []gruid.Point
 	entry     gruid.Point
 	datastore gruid.Point
 	sentry    gruid.Point
+}
+
+// networkCorps and networkSuffixes are combined with a random number to
+// generate a flavorful network name, e.g. "OBSIDIAN LOGISTICS-GRID-14".
+var networkCorps = []string{
+	"OBSIDIAN LOGISTICS", "HELIX BIOTECH", "IRONVEIL DYNAMICS", "SABLECORE",
+	"ZENITH ORBITAL", "COBALT MERIDIAN", "PALEFIRE INDUSTRIES", "VANTAPOINT",
+	"ECHELON-9", "BLACKWELL HOLDINGS", "NEONBANK", "GRIDLOCK SYSTEMS",
+	"OSAKA DYNAMICS", "VESPER CORP", "MERIDIAN ARMS", "DEEPWELL BIOTECH",
+}
+
+var networkSuffixes = []string{
+	"SUBNET", "NODE", "GRID", "CLUSTER", "MESH", "CORE", "VAULT", "ARRAY",
+	"RELAY", "NEXUS", "SECTOR",
+}
+
+func randomNetworkName(rng *rand.Rand) string {
+	corp := networkCorps[rng.Intn(len(networkCorps))]
+	suffix := networkSuffixes[rng.Intn(len(networkSuffixes))]
+	num := rng.Intn(99) + 1
+	return fmt.Sprintf("%s-%s-%d", corp, suffix, num)
 }
 
 func (nw *network) walkable(p gruid.Point) bool {
@@ -50,7 +74,7 @@ func (nw *network) walkable(p gruid.Point) bool {
 }
 
 func generateNetwork(rng *rand.Rand) *network {
-	nw := &network{tiles: make([][]tileKind, netHeight)}
+	nw := &network{name: randomNetworkName(rng), tiles: make([][]tileKind, netHeight)}
 	for y := range nw.tiles {
 		nw.tiles[y] = make([]tileKind, netWidth)
 	}
