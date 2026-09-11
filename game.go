@@ -23,20 +23,24 @@ const (
 	traceBarWidth = 12
 )
 
-// integrityMax is starting health; zero means you flatline. The sentry ICE
-// deals sentryDamage per hit — enough that one contact is a real cost but
-// not an instant kill.
+// integrityMax is starting health; zero means you flatline. Sentry and
+// patrol ICE deal iceDamage per hit — enough that one contact is a real
+// cost but not an instant kill. A trace spiker instead dumps
+// spikeTraceAmount straight into the trace meter, a comparable proportion
+// of its budget.
 const (
 	integrityMax      = 100
 	integrityBarWidth = 12
-	sentryDamage      = 25
+	iceDamage         = 25
+	spikeTraceAmount  = 45
 )
 
 // RAM is a fixed budget for the whole run — it does not recharge, so
 // running a program is spending down a resource you can't get back, not
 // topping off a meter. Costs are sized so you can afford one coherent plan
-// (say, scan then break) but not everything: break+cloak alone already
-// blows the budget, since a run only ever has the one sentry to deal with.
+// (say, scan then break one threat) but not everything: with three ICE now
+// on the map, breaking every one of them isn't a viable default strategy —
+// cloaking past some of them is the budget-friendly play.
 // Each program also taxes the trace meter via its own traceStep multiplier.
 const (
 	ramMax      = 8
@@ -50,7 +54,7 @@ const (
 
 	cloakRAMCost   = 5
 	cloakTraceCost = 2
-	cloakDuration  = 6 // turns of sentry immunity after casting
+	cloakDuration  = 6 // turns of ICE immunity after casting
 )
 
 // The game view is framed in a box: a title bar naming the network, the
@@ -82,14 +86,14 @@ type game struct {
 
 	fov        *rl.FOV
 	discovered map[gruid.Point]bool // ever been in view; fog hides the rest
+	visible    map[gruid.Point]bool // in view this turn; gates live ICE positions
 
 	trace      int
 	integrity  int
 	ram        int
-	cloakTurns int // remaining turns the sentry can't see or block you
+	cloakTurns int // remaining turns ICE can't see or block you
 
-	iceAlive   bool
-	iceSpotted bool // for the one-time "hasn't seen you yet" flavor message
+	ices []ice
 
 	hasData   bool
 	won       bool
@@ -110,22 +114,59 @@ func newGame() *game {
 		discovered: map[gruid.Point]bool{},
 		integrity:  integrityMax,
 		ram:        ramMax,
-		iceAlive:   true,
+		ices:       newIces(net),
 		grid:       gruid.NewGrid(1, 1), // resized on first Draw to fit the current screen
 	}
 	g.scan()
 	return g
 }
 
-// scan recomputes what's visible from the player's position and adds it to
-// the discovered set, which is permanent for the rest of the run.
+// newIces builds the run's ICE from the network's fixed placements: a
+// stationary sentry and spiker, plus a patrol if the network generated a
+// usable beat for one to pace along.
+func newIces(net *network) []ice {
+	ices := []ice{
+		{kind: iceSentry, pos: net.sentry, alive: true},
+		{kind: iceSpiker, pos: net.spiker, alive: true},
+	}
+	if len(net.patrolRoute) >= 2 {
+		ices = append(ices, ice{
+			kind:    icePatrol,
+			pos:     net.patrolRoute[0],
+			alive:   true,
+			route:   net.patrolRoute,
+			forward: true,
+		})
+	}
+	return ices
+}
+
+// scan recomputes what's visible from the player's position. visible is
+// this turn's line of sight only, used to gate live ICE positions (so a
+// patrol's current spot isn't given away by stale map memory); discovered
+// is permanent terrain memory for the rest of the run.
 func (g *game) scan() {
-	for _, p := range g.fov.SSCVisionMap(g.player, fovRadius, g.net.walkable, true) {
-		if !g.discovered[p] && p == g.net.sentry && g.iceAlive && !g.iceSpotted {
-			g.iceSpotted = true
-			g.message = "A sentry ICE blocks the way ahead. It hasn't noticed you yet."
+	pts := g.fov.SSCVisionMap(g.player, fovRadius, g.net.walkable, true)
+	g.visible = make(map[gruid.Point]bool, len(pts))
+	for _, p := range pts {
+		g.visible[p] = true
+		if !g.discovered[p] {
+			g.spotIce(p)
 		}
 		g.discovered[p] = true
+	}
+}
+
+// spotIce fires an ICE's one-time "you've noticed it" flavor message if it
+// currently occupies the newly discovered tile p.
+func (g *game) spotIce(p gruid.Point) {
+	for i := range g.ices {
+		ic := &g.ices[i]
+		if ic.alive && !ic.spotted && ic.pos == p {
+			ic.spotted = true
+			g.message = ic.spottedMessage()
+			return
+		}
 	}
 }
 
@@ -192,9 +233,11 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	if !g.net.walkable(next) {
 		return nil
 	}
-	if next == g.net.sentry && g.iceAlive && g.cloakTurns == 0 {
-		g.message = "Sentry ICE blocks the way. Break (b) or cloak past (c)."
-		return nil
+	if g.cloakTurns == 0 {
+		if ic := g.iceOccupying(next); ic != nil {
+			g.message = ic.blockedMessage()
+			return nil
+		}
 	}
 	g.player = next
 	g.scan()
@@ -210,23 +253,46 @@ func (g *game) updateKeyDown(msg gruid.MsgKeyDown) gruid.Effect {
 	return nil
 }
 
-// updateBreak handles the "b" command: destroy the sentry ICE if the
-// player is standing next to it.
+// updateBreak handles the "b" command: destroy whichever ICE the player is
+// standing next to.
 func (g *game) updateBreak() gruid.Effect {
-	if !g.iceAlive || !adjacent(g.player, g.net.sentry) {
+	ic := g.adjacentIce()
+	if ic == nil {
 		g.message = "Nothing to break here."
 		return nil
 	}
 	if !g.spendRAM(breakRAMCost) {
 		return nil
 	}
-	g.iceAlive = false
-	g.message = "Sentry ICE broken. The way is clear."
+	ic.alive = false
+	g.message = ic.brokenMessage()
 	g.addTrace(traceStep * breakTraceCost)
 	if g.traced {
 		return nil
 	}
 	g.afterAction()
+	return nil
+}
+
+// adjacentIce returns the first alive ICE next to the player, if any.
+func (g *game) adjacentIce() *ice {
+	for i := range g.ices {
+		if g.ices[i].alive && adjacent(g.player, g.ices[i].pos) {
+			return &g.ices[i]
+		}
+	}
+	return nil
+}
+
+// iceOccupying returns the alive ICE standing exactly at p, if any —
+// physical occupancy, independent of whether the player can currently see
+// it (you can still bump into something in the fog).
+func (g *game) iceOccupying(p gruid.Point) *ice {
+	for i := range g.ices {
+		if g.ices[i].alive && g.ices[i].pos == p {
+			return &g.ices[i]
+		}
+	}
 	return nil
 }
 
@@ -280,9 +346,9 @@ func (g *game) spendRAM(cost int) bool {
 }
 
 // afterAction runs the bookkeeping shared by every turn-consuming action:
-// an active cloak counts down, and the sentry ICE (if still alive,
-// adjacent, and not cloaked against) gets its counter-attack in. RAM does
-// not recharge — what you spend is gone for the run.
+// an active cloak counts down, any patrol takes its step, and any ICE
+// still alive, adjacent, and not cloaked against gets its effect in. RAM
+// does not recharge — what you spend is gone for the run.
 func (g *game) afterAction() {
 	if g.cloakTurns > 0 {
 		g.cloakTurns--
@@ -290,23 +356,41 @@ func (g *game) afterAction() {
 			g.message = "Your cloak fades."
 		}
 	}
-	g.resolveSentry()
+	for i := range g.ices {
+		g.ices[i].advance(g.player)
+	}
+	g.resolveIce()
 }
 
-// resolveSentry deals damage if the player is next to a still-alive,
-// uncloaked sentry ICE, ending the run if it drops integrity to zero.
-func (g *game) resolveSentry() {
-	if !g.iceAlive || g.cloakTurns > 0 || !adjacent(g.player, g.net.sentry) {
+// resolveIce applies each still-alive, adjacent, uncloaked ICE's effect:
+// sentry and patrol damage integrity (ending the run at zero); a spiker
+// dumps trace instead (ending the run if that maxes it out).
+func (g *game) resolveIce() {
+	if g.cloakTurns > 0 {
 		return
 	}
-	g.integrity -= sentryDamage
-	if g.integrity <= 0 {
-		g.integrity = 0
-		g.flatlined = true
-		g.message = "FLATLINED. The sentry ICE fries your brain. Press q to quit."
-		return
+	for i := range g.ices {
+		ic := &g.ices[i]
+		if !ic.alive || !adjacent(g.player, ic.pos) {
+			continue
+		}
+		if ic.kind == iceSpiker {
+			g.addTrace(spikeTraceAmount)
+			if g.traced {
+				return
+			}
+			g.message = ic.hitMessage()
+			continue
+		}
+		g.integrity -= iceDamage
+		if g.integrity <= 0 {
+			g.integrity = 0
+			g.flatlined = true
+			g.message = ic.flatlineMessage()
+			return
+		}
+		g.message = ic.hitMessage()
 	}
-	g.message = "The sentry ICE hits you. Integrity dropping."
 }
 
 // addTrace fills the trace meter, ending the run if it maxes out.
@@ -427,13 +511,16 @@ func (g *game) drawGame() gruid.Grid {
 // mapCell returns the cell to draw for a position on the network map
 // itself (not the border or stats/message lines).
 func (g *game) mapCell(p gruid.Point) gruid.Cell {
-	switch {
-	case p == g.player:
+	if p == g.player {
 		return gruid.Cell{Rune: '@', Style: gruid.Style{Fg: ColorPlayer}}
-	case !g.discovered[p]:
+	}
+	if !g.discovered[p] {
 		return gruid.Cell{Rune: ' '}
-	case p == g.net.sentry && g.iceAlive:
-		return gruid.Cell{Rune: '▲', Style: gruid.Style{Fg: ColorIce}}
+	}
+	if ic := g.iceAt(p); ic != nil {
+		return gruid.Cell{Rune: ic.glyph(), Style: gruid.Style{Fg: ic.color()}}
+	}
+	switch {
 	case p == g.net.datastore && !g.hasData:
 		return gruid.Cell{Rune: '$', Style: gruid.Style{Fg: ColorData}}
 	case p == g.net.entry:
@@ -445,4 +532,24 @@ func (g *game) mapCell(p gruid.Point) gruid.Cell {
 	default:
 		return gruid.Cell{Rune: ' '}
 	}
+}
+
+// iceAt returns the alive ICE to render at p, if any. A patrol only shows
+// up while p is within the player's current line of sight (visible), so
+// its live position isn't given away by permanent map memory; stationary
+// ICE render as soon as their tile is discovered, same as before —
+// including via a full-map scanner ping, which reveals topology but not a
+// patrol's real-time position.
+func (g *game) iceAt(p gruid.Point) *ice {
+	for i := range g.ices {
+		ic := &g.ices[i]
+		if !ic.alive || ic.pos != p {
+			continue
+		}
+		if ic.kind == icePatrol && !g.visible[p] {
+			return nil
+		}
+		return ic
+	}
+	return nil
 }

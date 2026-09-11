@@ -17,6 +17,7 @@ const (
 	ColorIce
 	ColorRAM
 	ColorEntry
+	ColorPatrol
 )
 
 // styleManager implements gtcell.StyleManager, mapping gruid's abstract
@@ -44,6 +45,8 @@ func (styleManager) GetStyle(st gruid.Style) tcell.Style {
 		ts = ts.Foreground(tcell.ColorBlue)
 	case ColorEntry:
 		ts = ts.Foreground(tcell.ColorTeal)
+	case ColorPatrol:
+		ts = ts.Foreground(tcell.ColorOrange)
 	default:
 		ts = ts.Foreground(tcell.ColorReset)
 	}

@@ -33,16 +33,18 @@ const (
 
 // network holds the generated map: which tiles are walkable (node or edge)
 // and where the nodes are. entry is where the player jacks in and must
-// return to; datastore is the objective node; sentry is a node held by a
-// sentry ICE that blocks passage until broken. name is cosmetic flavor
-// shown in the UI border.
+// return to; datastore is the objective node. sentry and spiker are nodes
+// held by stationary ICE; patrolRoute is the tile path a moving ICE paces
+// back and forth along. name is cosmetic flavor shown in the UI border.
 type network struct {
-	name      string
-	tiles     [][]tileKind // [y][x]
-	nodes     []gruid.Point
-	entry     gruid.Point
-	datastore gruid.Point
-	sentry    gruid.Point
+	name        string
+	tiles       [][]tileKind // [y][x]
+	nodes       []gruid.Point
+	entry       gruid.Point
+	datastore   gruid.Point
+	sentry      gruid.Point
+	spiker      gruid.Point
+	patrolRoute []gruid.Point
 }
 
 // networkCorps and networkSuffixes are combined with a random number to
@@ -80,7 +82,8 @@ func generateNetwork(rng *rand.Rand) *network {
 	}
 
 	nw.nodes = placeNodes(rng)
-	for _, e := range connectNodes(nw.nodes, rng) {
+	edges := connectNodes(nw.nodes, rng)
+	for _, e := range edges {
 		nw.carveEdge(nw.nodes[e[0]], nw.nodes[e[1]], rng)
 	}
 	for _, p := range nw.nodes {
@@ -90,8 +93,69 @@ func generateNetwork(rng *rand.Rand) *network {
 	nw.entry = nw.nodes[0]
 	nw.datastore = farthestNode(nw.nodes, nw.entry)
 	nw.sentry = otherNode(nw.nodes, rng, nw.entry, nw.datastore)
+	nw.spiker = otherNode(nw.nodes, rng, nw.entry, nw.datastore, nw.sentry)
+	nw.patrolRoute = nw.choosePatrolRoute(edges, rng, nw.entry, nw.datastore, nw.sentry, nw.spiker)
 
 	return nw
+}
+
+// choosePatrolRoute picks a random edge whose endpoints are clear of the
+// other fixed points, and returns the tile path between them for a patrol
+// ICE to pace along. Falls back to any edge if every one is contested,
+// which only happens on a very small or crowded network.
+func (nw *network) choosePatrolRoute(edges [][2]int, rng *rand.Rand, exclude ...gruid.Point) []gruid.Point {
+	excluded := func(p gruid.Point) bool {
+		for _, e := range exclude {
+			if p == e {
+				return true
+			}
+		}
+		return false
+	}
+	var candidates [][2]int
+	for _, e := range edges {
+		if !excluded(nw.nodes[e[0]]) && !excluded(nw.nodes[e[1]]) {
+			candidates = append(candidates, e)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = edges
+	}
+	e := candidates[rng.Intn(len(candidates))]
+	return nw.tilePath(nw.nodes[e[0]], nw.nodes[e[1]])
+}
+
+// tilePath finds the shortest walkable-tile path between a and b via BFS.
+// Used for the patrol's beat, where a and b are two nodes joined by a
+// carved edge, so a path is guaranteed to exist.
+func (nw *network) tilePath(a, b gruid.Point) []gruid.Point {
+	prev := map[gruid.Point]gruid.Point{a: a}
+	queue := []gruid.Point{a}
+	dirs := []gruid.Point{{X: 1}, {X: -1}, {Y: 1}, {Y: -1}}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		if p == b {
+			var path []gruid.Point
+			for p != a {
+				path = append([]gruid.Point{p}, path...)
+				p = prev[p]
+			}
+			return append([]gruid.Point{a}, path...)
+		}
+		for _, d := range dirs {
+			n := gruid.Point{X: p.X + d.X, Y: p.Y + d.Y}
+			if !nw.walkable(n) {
+				continue
+			}
+			if _, ok := prev[n]; ok {
+				continue
+			}
+			prev[n] = p
+			queue = append(queue, n)
+		}
+	}
+	return nil
 }
 
 // otherNode picks a random node that isn't any of the excluded points.
